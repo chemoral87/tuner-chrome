@@ -43,6 +43,10 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush PitchLineColor = new(Color.FromArgb(200, 187, 238, 255));
     private static readonly SolidColorBrush NoteNameBrush = new(Color.FromArgb(60, 255, 255, 255));
 
+    // Waveform colors
+    private static readonly SolidColorBrush WaveformLineColor = new(Color.FromArgb(220, 100, 220, 180));
+    private static readonly SolidColorBrush WaveformCenterLine = new(Color.FromArgb(30, 255, 255, 255));
+
     // Spectrum colors
     private static readonly SolidColorBrush SpectrumBarColor = new(Color.FromArgb(200, 100, 180, 255));
     private static readonly SolidColorBrush SpectrumPeakColor = new(Color.FromArgb(220, 215, 252, 112));
@@ -55,8 +59,20 @@ public partial class MainWindow : Window
     // Spectrum state
     private double[]? _lastSpectrum;
 
+    // Waveform state: circular buffer of recent samples
+    private readonly float[] _waveformBuffer = new float[2048];
+    private int _waveformWritePos;
+    private int _waveformCount;
+
     // System tray
     private TrayIconManager? _trayIcon;
+
+    // Global hotkey
+    private GlobalHotkeyManager? _hotkeyManager;
+    private const int HotkeyToggleWindow = 1; // ID for Ctrl+T
+
+    // Startup mode
+    private bool _startMinimized;
 
     public MainWindow()
     {
@@ -75,11 +91,25 @@ public partial class MainWindow : Window
             onShow: ShowWindow,
             onExit: ExitApplication
         );
+
+        // Check for --minimized command-line argument
+        _startMinimized = Environment.GetCommandLineArgs()
+            .Any(arg => arg.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+
+        // Sync auto-start checkbox with current registry state
+        AutoStartCheckBox.IsChecked = AutoStartManager.IsAutoStartEnabled();
     }
 
     private void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         StartAudio();
+        RegisterHotkeys();
+
+        // If started with --minimized, hide to tray immediately
+        if (_startMinimized)
+        {
+            Hide();
+        }
     }
 
     private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -87,6 +117,49 @@ public partial class MainWindow : Window
         // Minimize to tray instead of closing
         e.Cancel = true;
         Hide();
+    }
+
+    private void RegisterHotkeys()
+    {
+        try
+        {
+            _hotkeyManager = new GlobalHotkeyManager();
+
+            // Ctrl+T: Toggle window visibility
+            int ctrlT = KeyInterop.VirtualKeyFromKey(Key.T);
+            bool registered = _hotkeyManager.Register(
+                HotkeyToggleWindow,
+                0x0002, // MOD_CONTROL
+                ctrlT,
+                ToggleWindowVisibility
+            );
+
+            if (!registered)
+            {
+                System.Diagnostics.Debug.WriteLine("Failed to register Ctrl+T hotkey — may be in use by another app.");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to register global hotkeys: {ex.Message}");
+        }
+    }
+
+    private void ToggleWindowVisibility()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (IsVisible)
+            {
+                Hide();
+            }
+            else
+            {
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+            }
+        });
     }
 
     private void ShowWindow()
@@ -104,8 +177,9 @@ public partial class MainWindow : Window
         Dispatcher.Invoke(() =>
         {
             StopAudio();
+            _hotkeyManager?.Dispose();
             _trayIcon?.Dispose();
-            Application.Current.Shutdown();
+            System.Windows.Application.Current.Shutdown();
         });
     }
 
@@ -172,6 +246,12 @@ public partial class MainWindow : Window
             {
                 short sample = BitConverter.ToInt16(e.Buffer, i * bytesPerSample * channels);
                 _inputBuffer[i] = sample / 32768f;
+
+                // Append to waveform circular buffer
+                _waveformBuffer[_waveformWritePos] = _inputBuffer[i];
+                _waveformWritePos = (_waveformWritePos + 1) % _waveformBuffer.Length;
+                if (_waveformCount < _waveformBuffer.Length)
+                    _waveformCount++;
             }
             _hasNewData = true;
         }
@@ -235,15 +315,18 @@ public partial class MainWindow : Window
         while (_historyData.Count > MaxHistoryLength)
             _historyData.RemoveAt(0);
 
-        // Draw both canvases
+        // Draw pitch tracker (always rendered to keep history updated)
         RenderPitchTracker();
 
         // Update tray tooltip with current note
         UpdateTrayTooltip();
 
-        // Only render spectrum if window is visible (save GPU when minimized)
+        // Only render waveform and spectrum if window is visible (save GPU when minimized)
         if (IsVisible)
+        {
+            RenderWaveform();
             RenderSpectrum();
+        }
     }
 
     private void UpdateTrayTooltip()
@@ -285,12 +368,18 @@ public partial class MainWindow : Window
 
     private double GetY(double note) => 300 - (note * 45.0) / 2.0;
 
-    #region Calibration Slider
+    #region Settings
 
     private void CalibrationSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         _referenceFrequency = e.NewValue;
         CalibrationValue.Text = $"{(int)_referenceFrequency} Hz";
+    }
+
+    private void AutoStartCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        bool enabled = AutoStartCheckBox.IsChecked == true;
+        AutoStartManager.SetAutoStart(enabled);
     }
 
     #endregion
@@ -485,6 +574,105 @@ public partial class MainWindow : Window
             NoteDisplay.Text = "";
             CentsDisplay.Text = "";
             NoteDisplayBottom.Text = "";
+        }
+    }
+
+    #endregion
+
+    #region Waveform Oscilloscope Rendering
+
+    private void RenderWaveform()
+    {
+        WaveformCanvas.Children.Clear();
+
+        double width = WaveformCanvas.ActualWidth;
+        double height = WaveformCanvas.ActualHeight;
+        if (width <= 0) width = 480;
+        if (height <= 0) height = 100;
+
+        double centerY = height / 2.0;
+
+        // Draw center line (zero crossing reference)
+        var centerLine = new Line
+        {
+            X1 = 0, Y1 = centerY,
+            X2 = width, Y2 = centerY,
+            Stroke = WaveformCenterLine,
+            StrokeThickness = 1
+        };
+        WaveformCanvas.Children.Add(centerLine);
+
+        // Draw subtle grid lines at +/- 50% and +/- 100%
+        for (int g = -1; g <= 1; g += 2)
+        {
+            double gy = centerY + g * (centerY * 0.5);
+            var gridLine = new Line
+            {
+                X1 = 0, Y1 = gy,
+                X2 = width, Y2 = gy,
+                Stroke = GridLineColor,
+                StrokeThickness = 1
+            };
+            WaveformCanvas.Children.Add(gridLine);
+        }
+
+        if (_waveformCount < 2) return;
+
+        // Read the circular buffer into a display buffer
+        int displaySamples = Math.Min(_waveformCount, (int)width);
+        float[] displayBuffer = new float[displaySamples];
+
+        lock (_bufferLock)
+        {
+            int startIdx = (_waveformWritePos - displaySamples + _waveformBuffer.Length) % _waveformBuffer.Length;
+            for (int i = 0; i < displaySamples; i++)
+            {
+                displayBuffer[i] = _waveformBuffer[(startIdx + i) % _waveformBuffer.Length];
+            }
+        }
+
+        // Auto-scale: find peak amplitude for vertical scaling
+        float peak = 0;
+        for (int i = 0; i < displaySamples; i++)
+        {
+            float abs = Math.Abs(displayBuffer[i]);
+            if (abs > peak) peak = abs;
+        }
+
+        // Scale so peak uses 80% of the available height (leave some headroom)
+        float scale = peak > 0.01f ? (float)(centerY * 0.8 / peak) : 1.0f;
+
+        // Draw waveform as a polyline
+        var points = new PointCollection(displaySamples);
+        for (int i = 0; i < displaySamples; i++)
+        {
+            double x = (double)i / displaySamples * width;
+            double y = centerY - displayBuffer[i] * scale;
+            points.Add(new Point(x, y));
+        }
+
+        var waveform = new Polyline
+        {
+            Points = points,
+            Stroke = WaveformLineColor,
+            StrokeThickness = 1.5
+        };
+        WaveformCanvas.Children.Add(waveform);
+
+        // Draw peak level indicator on the right side
+        if (peak > 0.01)
+        {
+            double levelHeight = peak * centerY * 0.8;
+            var levelBar = new Rectangle
+            {
+                Width = 3,
+                Height = levelHeight,
+                Fill = WaveformLineColor,
+                Opacity = 0.6
+            };
+            Canvas.SetLeft(levelBar, width - 8);
+            Canvas.SetTop(levelBar, centerY - levelHeight);
+            WaveformCanvas.Children.Add(levelBar);
         }
     }
 
