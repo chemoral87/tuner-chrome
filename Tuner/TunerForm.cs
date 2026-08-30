@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using NAudio.Wave;
 
@@ -72,6 +73,16 @@ public sealed class TunerForm : Form
     private bool _moveMode;
     private Point _moveStart;
 
+    // --- Win32 click-through ---
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
     // --- Settings persistence ---
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -86,6 +97,10 @@ public sealed class TunerForm : Form
         BackColor = Color.Black;
         TopMost = true;
         Opacity = 0.7;
+
+        // Make window click-through by default (WS_EX_TRANSPARENT)
+        // WS_EX_LAYERED is auto-set by Opacity property, required for transparent input
+        Load += (_, _) => SetClickThrough(true);
 
         // Canvas panel for custom rendering
         _canvas = new Panel
@@ -185,6 +200,7 @@ public sealed class TunerForm : Form
             _moveMode = !_moveMode;
             _moveMenuItem.Checked = _moveMode;
             Cursor = _moveMode ? Cursors.SizeAll : Cursors.Default;
+            SetClickThrough(!_moveMode);
         };
 
         _trayMenu.Items.Add("Show Window", null, (_, _) => RestoreFromTray());
@@ -237,6 +253,20 @@ public sealed class TunerForm : Form
                 Cursor = Cursors.Default;
             }
         };
+    }
+
+    /// <summary>
+    /// Enables or disables click-through on the window.
+    /// When enabled, all mouse input passes to the window behind.
+    /// </summary>
+    private void SetClickThrough(bool enable)
+    {
+        int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
+        if (enable)
+            exStyle |= WS_EX_TRANSPARENT;
+        else
+            exStyle &= ~WS_EX_TRANSPARENT;
+        SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
     }
 
     private void MinimizeToTray()
