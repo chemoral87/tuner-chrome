@@ -1,6 +1,8 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Text.Json;
+using Microsoft.Win32;
 using NAudio.Wave;
 
 namespace Tuner;
@@ -58,17 +60,31 @@ public sealed class TunerForm : Form
     // --- UI ---
     private readonly System.Windows.Forms.Timer _renderTimer;
     private readonly Panel _canvas;
-    private ComboBox? _notationCombo;
     private Label? _statusLabel;
+
+    // --- Tray icon ---
+    private readonly NotifyIcon _trayIcon;
+    private readonly ContextMenuStrip _trayMenu;
+    private ToolStripMenuItem _startupMenuItem = null!;
+
+    // --- Drag support ---
+    private bool _dragging;
+    private Point _dragStart;
+
+    // --- Settings persistence ---
+    private static readonly string SettingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "Tuner", "settings.json");
 
     public TunerForm()
     {
         Text = "Tuner";
         Size = new Size(CanvasWidth + 16, CanvasHeight + 60); // Extra for controls
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.Black;
+        TopMost = true;
+        Opacity = 0.7;
 
         // Canvas panel for custom rendering
         _canvas = new Panel
@@ -84,29 +100,7 @@ public sealed class TunerForm : Form
         _canvas.Paint += Canvas_Paint;
         Controls.Add(_canvas);
 
-        // Notation mode selector
-        _notationCombo = new ComboBox
-        {
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Location = new Point(8, CanvasHeight + 14),
-            Size = new Size(360, 24),
-            BackColor = Color.Black,
-            ForeColor = Color.FromArgb(139, 134, 133), // #8b8685
-            FlatStyle = FlatStyle.Flat,
-        };
-        _notationCombo.Items.AddRange(["Pitch notation: Roland (C4 = middle C)", "Pitch notation: Yamaha (C3 = middle C)", "Pitch notation: Cakewalk (C5 = middle C)"]);
-        _notationCombo.SelectedIndex = 0;
-        _notationCombo.SelectedIndexChanged += (_, _) =>
-        {
-            _notationMode = _notationCombo.SelectedIndex switch
-            {
-                0 => NotationMode.Roland,
-                1 => NotationMode.Yamaha,
-                2 => NotationMode.Cakewalk,
-                _ => NotationMode.Roland,
-            };
-        };
-        Controls.Add(_notationCombo);
+
 
         // Status label
         _statusLabel = new Label
@@ -123,8 +117,220 @@ public sealed class TunerForm : Form
         _renderTimer = new System.Windows.Forms.Timer { Interval = 16 };
         _renderTimer.Tick += RenderTimer_Tick;
 
-        Load += (_, _) => StartAudio();
-        FormClosing += (_, _) => StopAudio();
+        // --- System tray icon (visible from startup in notification area) ---
+        _trayMenu = new ContextMenuStrip();
+
+        // Opacity submenu
+        var opacityMenu = new ToolStripMenuItem("Opacity");
+        foreach (int pct in new[] { 25, 50, 70, 90, 100 })
+        {
+            double alpha = pct / 100.0;
+            var item = new ToolStripMenuItem($"{pct}%")
+            {
+                Checked = pct == 70, // default is 0.7
+            };
+            item.Click += (_, _) =>
+            {
+                Opacity = alpha;
+                foreach (ToolStripMenuItem m in opacityMenu.DropDownItems)
+                    m.Checked = false;
+                item.Checked = true;
+            };
+            opacityMenu.DropDownItems.Add(item);
+        }
+        // Pitch notation submenu
+        var notationMenu = new ToolStripMenuItem("Pitch Notation");
+        var notationOptions = new (string label, NotationMode mode)[]
+        {
+            ("Roland (C4 = middle C)", NotationMode.Roland),
+            ("Yamaha (C3 = middle C)", NotationMode.Yamaha),
+            ("Cakewalk (C5 = middle C)", NotationMode.Cakewalk),
+        };
+        foreach (var (label, mode) in notationOptions)
+        {
+            var item = new ToolStripMenuItem(label)
+            {
+                Checked = mode == NotationMode.Roland,
+            };
+            item.Click += (_, _) =>
+            {
+                _notationMode = mode;
+                foreach (ToolStripMenuItem m in notationMenu.DropDownItems)
+                    m.Checked = false;
+                item.Checked = true;
+            };
+            notationMenu.DropDownItems.Add(item);
+        }
+
+        // Start on Windows startup
+        _startupMenuItem = new ToolStripMenuItem("Start on Windows startup")
+        {
+            Checked = IsStartupEnabled(),
+        };
+        _startupMenuItem.Click += (_, _) =>
+        {
+            _startupMenuItem.Checked = !_startupMenuItem.Checked;
+            SetStartup(_startupMenuItem.Checked);
+        };
+
+        _trayMenu.Items.Add(opacityMenu);
+        _trayMenu.Items.Add(notationMenu);
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add(_startupMenuItem);
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add("Show Window", null, (_, _) => RestoreFromTray());
+        _trayMenu.Items.Add("Close", null, (_, _) => { StopAudio(); SaveSettings(); Application.Exit(); });
+
+        _trayIcon = new NotifyIcon
+        {
+            Text = "Tuner",
+            Icon = SystemIcons.Application,
+            Visible = true,
+            ContextMenuStrip = _trayMenu,
+        };
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+
+        Load += (_, _) =>
+        {
+            LoadSettings();
+            StartAudio();
+        };
+        FormClosing += (_, _) =>
+        {
+            SaveSettings();
+            StopAudio();
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+        };
+
+        // --- Drag support for borderless window ---
+        _canvas.MouseDown += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                _dragging = true;
+                _dragStart = e.Location;
+            }
+        };
+        _canvas.MouseMove += (_, e) =>
+        {
+            if (_dragging)
+            {
+                Location = new Point(Location.X + e.X - _dragStart.X, Location.Y + e.Y - _dragStart.Y);
+            }
+        };
+        _canvas.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+                _dragging = false;
+        };
+    }
+
+    private void MinimizeToTray()
+    {
+        Hide();
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (WindowState == FormWindowState.Minimized)
+            MinimizeToTray();
+    }
+
+    // --- Startup on Windows boot ---
+    private static string GetExePath() => Environment.ProcessPath ??
+        System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
+
+    private static bool IsStartupEnabled()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false);
+        return key?.GetValue("Tuner") != null;
+    }
+
+    private static void SetStartup(bool enable)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
+        if (key == null) return;
+        if (enable)
+            key.SetValue("Tuner", $"\"{GetExePath()}\"");
+        else
+            key.DeleteValue("Tuner", false);
+    }
+
+    // --- Settings persistence (position, opacity, notation) ---
+    private void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsPath)) return;
+            var json = File.ReadAllText(SettingsPath);
+            var s = JsonSerializer.Deserialize<SettingsData>(json);
+            if (s == null) return;
+
+            if (s.X != 0 || s.Y != 0)
+                Location = new Point(s.X, s.Y);
+            if (s.Opacity > 0)
+                Opacity = s.Opacity;
+            if (Enum.IsDefined<NotationMode>(s.NotationMode))
+                _notationMode = s.NotationMode;
+
+            // Sync tray menu checkmarks
+            foreach (ToolStripMenuItem m in _trayMenu.Items.OfType<ToolStripMenuItem>())
+            {
+                if (m.HasDropDown)
+                {
+                    foreach (ToolStripMenuItem sub in m.DropDownItems)
+                    {
+                        if (m.Text == "Opacity" && sub.Text == $"{(int)(Opacity * 100)}%")
+                        {
+                            foreach (ToolStripMenuItem x in m.DropDownItems) x.Checked = false;
+                            sub.Checked = true;
+                        }
+                        if (m.Text == "Pitch Notation")
+                        {
+                            sub.Checked = sub.Text.Contains(_notationMode.ToString());
+                        }
+                    }
+                }
+            }
+        }
+        catch { /* ignore corrupt settings */ }
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(SettingsPath)!;
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var s = new SettingsData
+            {
+                X = Location.X,
+                Y = Location.Y,
+                Opacity = Opacity,
+                NotationMode = _notationMode,
+            };
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch { /* ignore write errors */ }
+    }
+
+    private class SettingsData
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+        public double Opacity { get; set; }
+        public NotationMode NotationMode { get; set; }
     }
 
     private void StartAudio()
@@ -289,6 +495,7 @@ public sealed class TunerForm : Form
             // --- Note display (right side) for octaves -1, 0, +1 ---
             using var noteBrush = new SolidBrush(NoteDisplayColor);
             using var smearBrush = new SolidBrush(NoteDisplayColor);
+            using var infoBrush = new SolidBrush(Color.FromArgb(255, 255, 255, 0)); // yellow for cents+Hz
             using var noteFont = new Font("Segoe UI", 32f, FontStyle.Bold, GraphicsUnit.Pixel);
             using var infoFont = new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
 
@@ -307,16 +514,15 @@ public sealed class TunerForm : Form
                 noteBrush.Color = Color.FromArgb((int)(o * 255), NoteDisplayColor);
                 g.FillRectangle(noteBrush, SplitX, (float)y - 1, CanvasWidth - SplitX, 2);
 
-                // Note name
-                string noteName = $"{name}{octave}";
-                g.DrawString(noteName, noteFont, noteBrush, 290, (float)y - 8);
-
-                // Cents + Hz
+                // Cents + Hz (below the line)
                 int deviation = (int)Math.Round((note - Math.Round(note)) * 100);
                 string cents = deviation < 0 ? $"{deviation}" : $"+{deviation}";
                 string info = $"{cents} ({Math.Round(pitch)} Hz)";
-                var nameSize = g.MeasureString(noteName + " ", noteFont);
-                g.DrawString(info, infoFont, noteBrush, 290 + nameSize.Width, (float)y - 8);
+                g.DrawString(info, infoFont, infoBrush, 290, (float)y + 6);
+
+                // Note name (above the line)
+                string noteName = $"{name}{octave}";
+                g.DrawString(noteName, noteFont, noteBrush, 290, (float)y - 43);
             }
         }
 
