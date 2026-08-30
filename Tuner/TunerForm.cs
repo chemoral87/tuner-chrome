@@ -66,10 +66,11 @@ public sealed class TunerForm : Form
     private readonly NotifyIcon _trayIcon;
     private readonly ContextMenuStrip _trayMenu;
     private ToolStripMenuItem _startupMenuItem = null!;
+    private ToolStripMenuItem _moveMenuItem = null!;
 
-    // --- Drag support ---
-    private bool _dragging;
-    private Point _dragStart;
+    // --- Move mode (temporary drag via tray menu) ---
+    private bool _moveMode;
+    private Point _moveStart;
 
     // --- Settings persistence ---
     private static readonly string SettingsPath = Path.Combine(
@@ -178,7 +179,16 @@ public sealed class TunerForm : Form
         _trayMenu.Items.Add(new ToolStripSeparator());
         _trayMenu.Items.Add(_startupMenuItem);
         _trayMenu.Items.Add(new ToolStripSeparator());
+        _moveMenuItem = new ToolStripMenuItem("Move Window (hold & drag)");
+        _moveMenuItem.Click += (_, _) =>
+        {
+            _moveMode = !_moveMode;
+            _moveMenuItem.Checked = _moveMode;
+            Cursor = _moveMode ? Cursors.SizeAll : Cursors.Default;
+        };
+
         _trayMenu.Items.Add("Show Window", null, (_, _) => RestoreFromTray());
+        _trayMenu.Items.Add(_moveMenuItem);
         _trayMenu.Items.Add("Close", null, (_, _) => { StopAudio(); SaveSettings(); Application.Exit(); });
 
         _trayIcon = new NotifyIcon
@@ -203,26 +213,29 @@ public sealed class TunerForm : Form
             _trayIcon.Dispose();
         };
 
-        // --- Drag support for borderless window ---
+        // --- Move support (only when move mode is active) ---
         _canvas.MouseDown += (_, e) =>
         {
-            if (e.Button == MouseButtons.Left)
+            if (_moveMode && e.Button == MouseButtons.Left)
             {
-                _dragging = true;
-                _dragStart = e.Location;
+                _moveStart = e.Location;
             }
         };
         _canvas.MouseMove += (_, e) =>
         {
-            if (_dragging)
+            if (_moveMode && e.Button == MouseButtons.Left)
             {
-                Location = new Point(Location.X + e.X - _dragStart.X, Location.Y + e.Y - _dragStart.Y);
+                Location = new Point(Location.X + e.X - _moveStart.X, Location.Y + e.Y - _moveStart.Y);
             }
         };
         _canvas.MouseUp += (_, e) =>
         {
-            if (e.Button == MouseButtons.Left)
-                _dragging = false;
+            if (_moveMode && e.Button == MouseButtons.Left)
+            {
+                _moveMode = false;
+                _moveMenuItem.Checked = false;
+                Cursor = Cursors.Default;
+            }
         };
     }
 
