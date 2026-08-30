@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Tuner")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ae189e9948f3f2781c78360de0f75eb65116695a")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+84f17438f87dab5cb304131c0d9b98edc91b6c2c")]
 [assembly: System.Reflection.AssemblyProductAttribute("Tuner")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Tuner")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

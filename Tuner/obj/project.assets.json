@@ -483,7 +483,7 @@
   },
   "projectFileDependencyGroups": {
     "net9.0-windows": [
-      "NAudio >= 2.2.*"
+      "NAudio >= 2.2.1"
     ]
   },
   "packageFolders": {
@@ -540,7 +540,7 @@
         "dependencies": {
           "NAudio": {
             "target": "Package",
-            "version": "[2.2.*, )"
+            "version": "[2.2.1, )"
           }
         },
         "imports": [
@@ -558,7 +558,7 @@
           "Microsoft.NETCore.App": {
             "privateAssets": "all"
           },
-          "Microsoft.WindowsDesktop.App.WPF": {
+          "Microsoft.WindowsDesktop.App.WindowsForms": {
             "privateAssets": "none"
           }
         },
