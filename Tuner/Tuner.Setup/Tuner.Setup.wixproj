@@ -1,0 +1,32 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>Tuner</OutputName>
+    <DefaultLanguage>en-US</DefaultLanguage>
+  </PropertyGroup>
+
+  <!-- Platform-specific settings -->
+  <PropertyGroup Condition="'$(Platform)' == 'x64'">
+    <InstallerPlatform>x64</InstallerPlatform>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)' == 'x86'">
+    <InstallerPlatform>x86</InstallerPlatform>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Platform)' == ''">
+    <InstallerPlatform>x64</InstallerPlatform>
+  </PropertyGroup>
+
+  <!-- Pass PublishFolder as WiX preprocessor variable via DefineConstants -->
+  <PropertyGroup Condition="'$(InstallerPlatform)' == 'x64'">
+    <DefineConstants>$(DefineConstants);PublishFolder=publish-x64</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(InstallerPlatform)' == 'x86'">
+    <DefineConstants>$(DefineConstants);PublishFolder=publish-x86</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>

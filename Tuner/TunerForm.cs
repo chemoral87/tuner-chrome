@@ -151,6 +151,7 @@ public sealed class TunerForm : Form
                 foreach (ToolStripMenuItem m in opacityMenu.DropDownItems)
                     m.Checked = false;
                 item.Checked = true;
+                SaveSettings();
             };
             opacityMenu.DropDownItems.Add(item);
         }
@@ -205,6 +206,8 @@ public sealed class TunerForm : Form
 
         _trayMenu.Items.Add("Show Window", null, (_, _) => RestoreFromTray());
         _trayMenu.Items.Add(_moveMenuItem);
+        _trayMenu.Items.Add("Center on Screen", null, (_, _) => CenterOnScreen());
+        _trayMenu.Items.Add(new ToolStripSeparator());
         _trayMenu.Items.Add("Close", null, (_, _) => { StopAudio(); SaveSettings(); Application.Exit(); });
 
         _trayIcon = new NotifyIcon
@@ -279,6 +282,15 @@ public sealed class TunerForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
+    }
+
+    private void CenterOnScreen()
+    {
+        var screen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        var area = screen.WorkingArea;
+        Location = new Point(
+            area.Left + (area.Width - Width) / 2,
+            area.Top + (area.Height - Height) / 2);
     }
 
     protected override void OnResize(EventArgs e)

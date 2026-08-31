@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="Tuner"
+           Manufacturer="Tuner"
+           Version="1.0.0"
+           UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+           Scope="perMachine">
+
+    <SummaryInformation Description="Tuner - Chromatic Instrument Tuner" Manufacturer="Tuner" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Tuner is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Application icon -->
+    <Icon Id="TunerIcon" SourceFile="$(sys.CURRENTDIR)Tuner.ico" />
+    <Property Id="ARPPRODUCTICON" Value="TunerIcon" />
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="TunerFiles" />
+      <ComponentRef Id="TunerShortcuts" />
+    </Feature>
+
+    <!-- Install directory under Program Files (platform-dependent) -->
+    <?if $(PublishFolder) = "publish-x64" ?>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Tuner" />
+    </StandardDirectory>
+    <?else ?>
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="Tuner" />
+    </StandardDirectory>
+    <?endif ?>
+
+    <!-- Start Menu folder -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="Tuner" />
+    </StandardDirectory>
+
+    <!-- Desktop folder -->
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- Application files -->
+    <ComponentGroup Id="TunerFiles" Directory="INSTALLFOLDER">
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.exe" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.deps.json" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.runtimeconfig.json" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.Asio.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.Core.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.Midi.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.Wasapi.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.WinForms.dll" />
+      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\NAudio.WinMM.dll" />
+    </ComponentGroup>
+
+    <!-- Shortcuts (Start Menu + Desktop) -->
+    <DirectoryRef Id="ProgramMenuDir">
+      <Component Id="TunerShortcuts" Guid="C1D2E3F4-A5B6-7890-CDEF-123456789012">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Tuner"
+                  Description="Chromatic Instrument Tuner"
+                  Target="[INSTALLFOLDER]Tuner.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="TunerIcon" />
+        <Shortcut Id="DesktopShortcut"
+                  Name="Tuner"
+                  Description="Chromatic Instrument Tuner"
+                  Target="[INSTALLFOLDER]Tuner.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Directory="DesktopFolder"
+                  Icon="TunerIcon" />
+        <RemoveFolder Id="CleanUpStartMenu" Directory="ProgramMenuDir" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Tuner" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- UI -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+  </Package>
+</Wix>
