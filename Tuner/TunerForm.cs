@@ -70,14 +70,27 @@ public sealed class TunerForm : Form
     private ToolStripMenuItem _moveMenuItem = null!;
 
     // --- Win32 click-through ---
-    private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TRANSPARENT = 0x00000020;
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    /// <summary>
+    /// True while clicks should pass through the window to whatever is beneath it.
+    /// Declared in <see cref="CreateParams"/> rather than poked straight into the live window
+    /// with SetWindowLong: WinForms re-applies CreateParams whenever it updates styles, and
+    /// uses it again whenever it (re)creates the handle, so a manually written ex-style bit
+    /// can be silently reverted. Declaring it here keeps it in sync on every WinForms path.
+    /// </summary>
+    private bool _clickThrough = true;
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            if (_clickThrough)
+                cp.ExStyle |= WS_EX_TRANSPARENT;
+            return cp;
+        }
+    }
 
     // --- Move mode (temporary drag via tray menu) ---
     private bool _moveMode;
@@ -98,8 +111,8 @@ public sealed class TunerForm : Form
         TopMost = true;
         Opacity = 0.7;
 
-        // Make window click-through by default (WS_EX_TRANSPARENT)
-        Load += (_, _) => SetClickThrough(true);
+        // The window is click-through by default: WS_EX_TRANSPARENT is declared in
+        // CreateParams, so it is already set the moment the handle is created.
 
 
 
@@ -197,13 +210,7 @@ public sealed class TunerForm : Form
         _trayMenu.Items.Add(_startupMenuItem);
         _trayMenu.Items.Add(new ToolStripSeparator());
         _moveMenuItem = new ToolStripMenuItem("Move Window (hold & drag)");
-        _moveMenuItem.Click += (_, _) =>
-        {
-            _moveMode = !_moveMode;
-            _moveMenuItem.Checked = _moveMode;
-            Cursor = _moveMode ? Cursors.SizeAll : Cursors.Default;
-            SetClickThrough(!_moveMode);
-        };
+        _moveMenuItem.Click += (_, _) => SetMoveMode(!_moveMode);
 
         _trayMenu.Items.Add("Show Window", null, (_, _) => RestoreFromTray());
         _trayMenu.Items.Add(_moveMenuItem);
@@ -234,41 +241,58 @@ public sealed class TunerForm : Form
         };
 
         // --- Move support (only when move mode is active) ---
-        _canvas.MouseDown += (_, e) =>
+        _canvas.MouseDown += Canvas_MouseDown;
+        _canvas.MouseMove += Canvas_MouseMove;
+        _canvas.MouseUp += Canvas_MouseUp;
+        // A drag can end without ever raising MouseUp (capture lost, Alt+Tab, release
+        // over another window). End move mode there too so the window can never be
+        // left hittable with move mode reported as off.
+        _canvas.MouseCaptureChanged += (_, _) =>
         {
-            if (_moveMode && e.Button == MouseButtons.Left)
-            {
-                _moveStart = e.Location;
-            }
-        };
-        _canvas.MouseMove += (_, e) =>
-        {
-            if (_moveMode && e.Button == MouseButtons.Left)
-            {
-                Location = new Point(Location.X + e.X - _moveStart.X, Location.Y + e.Y - _moveStart.Y);
-            }
-        };
-        _canvas.MouseUp += (_, e) =>
-        {
-            if (_moveMode && e.Button == MouseButtons.Left)
-            {
-                _moveMode = false;
-                _moveMenuItem.Checked = false;
-                Cursor = Cursors.Default;
-            }
+            if (_moveMode && !_canvas.Capture)
+                SetMoveMode(false);
         };
     }
 
+    /// <summary>
+    /// Single owner of move-mode state: the drag flag, the tray checkmark, the cursor
+    /// and the click-through exit style must always change together. Enabling move mode
+    /// makes the window hittable so it can be dragged; disabling it must restore
+    /// WS_EX_TRANSPARENT so clicks pass through to whatever is underneath again.
+    /// </summary>
+    private void SetMoveMode(bool enable)
+    {
+        _moveMode = enable;
+        _moveMenuItem.Checked = enable;
+        Cursor = enable ? Cursors.SizeAll : Cursors.Default;
+        SetClickThrough(!enable);
+    }
 
+    private void Canvas_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (!_moveMode || e.Button != MouseButtons.Left) return;
+        _moveStart = e.Location;
+        _canvas.Capture = true; // keep receiving MouseMove/MouseUp if the cursor slips off
+    }
+
+    private void Canvas_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_moveMode || e.Button != MouseButtons.Left) return;
+        Location = new Point(Location.X + e.X - _moveStart.X, Location.Y + e.Y - _moveStart.Y);
+    }
+
+    private void Canvas_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (!_moveMode || e.Button != MouseButtons.Left) return;
+        SetMoveMode(false);
+        _canvas.Capture = false;
+    }
 
     private void SetClickThrough(bool enable)
     {
-        int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);
-        if (enable)
-            exStyle |= WS_EX_TRANSPARENT;
-        else
-            exStyle &= ~WS_EX_TRANSPARENT;
-        SetWindowLong(Handle, GWL_EXSTYLE, exStyle);
+        _clickThrough = enable;
+        if (IsHandleCreated)
+            UpdateStyles(); // re-applies CreateParams (and so the bit) to the live window
     }
 
     private void MinimizeToTray()

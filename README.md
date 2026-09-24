@@ -21,5 +21,5 @@ rm -rf tmp/chrome-profile && /Applications/Google\ Chrome.app/Contents/MacOS/Goo
 # One compiler
 
 cd Tuner
-dotnet publish Tuner.csproj -c Release -r win-x64 --self-contained false -o publish-x64
-dotnet build Tuner.Setup\Tuner.Setup.wixproj -c Release -p:Platform=x64
+dotnet publish Tuner.csproj -c Release -r win-x86 --self-contained false -o publish-x86
+dotnet build Tuner.Setup/Tuner.Setup.wixproj -c Release -p:Platform=x86
