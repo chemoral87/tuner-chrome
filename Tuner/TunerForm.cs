@@ -29,8 +29,10 @@ public sealed class TunerForm : Form
     // --- Color palette (matching tuner.js) ---
     private static readonly Color BgColor = Color.Black;
     private static readonly Color GridColor = Color.FromArgb(32, 255, 255, 255); // #fff2 ≈ 12.5% white
+    private static readonly Color KeyLineColor = Color.FromArgb(255, 255, 165, 0); // #ffa500 orange - grid line is in the selected key
     private static readonly Color GridLabelColor = Color.FromArgb(32, 255, 255, 255);
     private static readonly Color HighlightColor = Color.FromArgb(255, 215, 252, 112); // #d7fc70
+    private static readonly Color InKeyColor = Color.FromArgb(255, 255, 64, 64); // #ff4040 - note belongs to the selected key
     private static readonly Color NoteDisplayColor = Color.FromArgb(255, 187, 238, 255); // #bef
     private static readonly Color HistoryLineColor = Color.FromArgb(255, 187, 238, 255); // #bef
 
@@ -58,6 +60,28 @@ public sealed class TunerForm : Form
     // --- Notation ---
     private NotationMode _notationMode = NotationMode.Roland;
 
+    // --- Key highlighting (major scale) ---
+    // Tray-selected key root. A detected note belonging to that key is drawn in InKeyColor
+    // (red) instead of the usual green highlight / blue note. -1 means no key is selected,
+    // which leaves the rendering exactly as it was before this option existed.
+    private int _keyRoot = -1;
+    private static readonly string[] KeyRootNames =
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    // Semitone offsets of a major scale above its root (W-W-H-W-W-W-H).
+    private static readonly int[] MajorScaleDegrees = [0, 2, 4, 5, 7, 9, 11];
+
+    /// <summary>
+    /// True when the pitch class belongs to the major scale of the selected key root.
+    /// Tested against the rounded pitch class - the note actually shown on screen - so a
+    /// slightly flat F# in C major does not flicker in and out of key.
+    /// </summary>
+    private bool IsInSelectedKey(int pitchClass)
+    {
+        if (_keyRoot < 0) return false;
+        int degree = ((pitchClass - _keyRoot) % 12 + 12) % 12;
+        return MajorScaleDegrees.Contains(degree);
+    }
+
     // --- UI ---
     private readonly System.Windows.Forms.Timer _renderTimer;
     private readonly Panel _canvas;
@@ -68,6 +92,7 @@ public sealed class TunerForm : Form
     private readonly ContextMenuStrip _trayMenu;
     private ToolStripMenuItem _startupMenuItem = null!;
     private ToolStripMenuItem _moveMenuItem = null!;
+    private ToolStripMenuItem _keyMenuItem = null!;
 
     // --- Win32 click-through ---
     private const int WS_EX_TRANSPARENT = 0x00000020;
@@ -193,6 +218,28 @@ public sealed class TunerForm : Form
             notationMenu.DropDownItems.Add(item);
         }
 
+        // Key submenu: notes belonging to the selected major scale are highlighted in red.
+        // Dropdown layout is load-bearing: item 0 is "None", item n + 1 is pitch class n.
+        _keyMenuItem = new ToolStripMenuItem("Key (major scale)");
+        var noKeyItem = new ToolStripMenuItem("None") { Checked = true };
+        noKeyItem.Click += (_, _) =>
+        {
+            SelectKey(-1);
+            SaveSettings();
+        };
+        _keyMenuItem.DropDownItems.Add(noKeyItem);
+        for (int root = 0; root < KeyRootNames.Length; root++)
+        {
+            int selected = root;
+            var item = new ToolStripMenuItem(KeyRootNames[selected]);
+            item.Click += (_, _) =>
+            {
+                SelectKey(selected);
+                SaveSettings();
+            };
+            _keyMenuItem.DropDownItems.Add(item);
+        }
+
         // Start on Windows startup
         _startupMenuItem = new ToolStripMenuItem("Start on Windows startup")
         {
@@ -206,6 +253,7 @@ public sealed class TunerForm : Form
 
         _trayMenu.Items.Add(opacityMenu);
         _trayMenu.Items.Add(notationMenu);
+        _trayMenu.Items.Add(_keyMenuItem);
         _trayMenu.Items.Add(new ToolStripSeparator());
         _trayMenu.Items.Add(_startupMenuItem);
         _trayMenu.Items.Add(new ToolStripSeparator());
@@ -316,6 +364,20 @@ public sealed class TunerForm : Form
             area.Top + (area.Height - Height) / 2);
     }
 
+    /// <summary>
+    /// Selects the key used for in-key highlighting and keeps the tray submenu in sync.
+    /// The submenu layout is fixed: item 0 is "None", item n + 1 is pitch class n.
+    /// </summary>
+    private void SelectKey(int root)
+    {
+        _keyRoot = root;
+        for (int i = 0; i < _keyMenuItem.DropDownItems.Count; i++)
+        {
+            if (_keyMenuItem.DropDownItems[i] is ToolStripMenuItem item)
+                item.Checked = i == root + 1;
+        }
+    }
+
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
@@ -343,7 +405,7 @@ public sealed class TunerForm : Form
             key.DeleteValue("Tuner", false);
     }
 
-    // --- Settings persistence (position, opacity, notation) ---
+    // --- Settings persistence (position, opacity, notation, key) ---
     private void LoadSettings()
     {
         try
@@ -359,6 +421,8 @@ public sealed class TunerForm : Form
                 Opacity = s.Opacity;
             if (Enum.IsDefined<NotationMode>(s.NotationMode))
                 _notationMode = s.NotationMode;
+            if (s.ScaleRoot >= -1 && s.ScaleRoot < KeyRootNames.Length)
+                SelectKey(s.ScaleRoot);
 
             // Sync tray menu checkmarks
             foreach (ToolStripMenuItem m in _trayMenu.Items.OfType<ToolStripMenuItem>())
@@ -397,6 +461,7 @@ public sealed class TunerForm : Form
                 Y = Location.Y,
                 Opacity = Opacity,
                 NotationMode = _notationMode,
+                ScaleRoot = _keyRoot,
             };
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
         }
@@ -409,6 +474,9 @@ public sealed class TunerForm : Form
         public int Y { get; set; }
         public double Opacity { get; set; }
         public NotationMode NotationMode { get; set; }
+        // -1 = no key selected. Defaulted so settings files written before this option
+        // existed load with highlighting off rather than silently selecting C.
+        public int ScaleRoot { get; set; } = -1;
     }
 
     private void StartAudio()
@@ -530,13 +598,16 @@ public sealed class TunerForm : Form
 
         // --- Draw chromatic grid (13 horizontal lines) ---
         using var gridPen = new Pen(GridColor, 2f);
+        using var keyPen = new Pen(KeyLineColor, 2f);
         using var labelFont = new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
         using var labelBrush = new SolidBrush(GridLabelColor);
 
         for (int i = 0; i <= 12; i++)
         {
             float y = (float)GetY(i);
-            g.DrawLine(gridPen, 0, y, CanvasWidth, y);
+            // Lines belonging to the selected key are orange, so the scale reads at a glance
+            // even before a note is played. Line i is the pitch class i % 12 (line 12 = octave).
+            g.DrawLine(IsInSelectedKey(i % 12) ? keyPen : gridPen, 0, y, CanvasWidth, y);
             g.DrawString(PitchClasses[i % 12], labelFont, labelBrush, 32, y - 16);
         }
 
@@ -552,8 +623,14 @@ public sealed class TunerForm : Form
             if (pitchClass < 0) pitchClass += 12;
             string name = PitchClasses[pitchClass];
 
-            // --- Green highlight on chromatic grid ---
-            using var highlightPen = new Pen(Color.FromArgb(255, HighlightColor), 2f);
+            // Note belongs to the selected key -> red for both the horizontal grid line and
+            // the note itself; otherwise the original green highlight and blue note colours.
+            bool inKey = IsInSelectedKey(pitchClass);
+            Color highlightColor = inKey ? InKeyColor : HighlightColor;
+            Color noteColor = inKey ? InKeyColor : NoteDisplayColor;
+
+            // --- Highlight the grid line of the nearest pitch class ---
+            using var highlightPen = new Pen(Color.FromArgb(255, highlightColor), 2f);
             for (int i = 0; i < 12; i++)
             {
                 double dist = p - i;
@@ -564,15 +641,15 @@ public sealed class TunerForm : Form
                 {
                     double alpha = (1 - dist / 0.5) * o;
                     int a = (int)(alpha * 255);
-                    highlightPen.Color = Color.FromArgb(Math.Clamp(a, 0, 255), HighlightColor);
+                    highlightPen.Color = Color.FromArgb(Math.Clamp(a, 0, 255), highlightColor);
                     float y = (float)GetY(i);
                     g.DrawLine(highlightPen, 0, y, CanvasWidth, y);
                 }
             }
 
             // --- Note display (right side) for octaves -1, 0, +1 ---
-            using var noteBrush = new SolidBrush(NoteDisplayColor);
-            using var smearBrush = new SolidBrush(NoteDisplayColor);
+            using var noteBrush = new SolidBrush(noteColor);
+            using var smearBrush = new SolidBrush(noteColor);
             using var infoBrush = new SolidBrush(Color.FromArgb(255, 255, 255, 0)); // yellow for cents+Hz
             using var noteFont = new Font("Segoe UI", 32f, FontStyle.Bold, GraphicsUnit.Pixel);
             using var infoFont = new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
@@ -585,11 +662,11 @@ public sealed class TunerForm : Form
                 // Smear rectangle (gap between actual and rounded pitch)
                 double smearAlpha = o * (1 - Math.Abs(p - Math.Round(p)) / 0.5);
                 int smearA = (int)(smearAlpha * 255);
-                smearBrush.Color = Color.FromArgb(Math.Clamp(smearA, 0, 255), NoteDisplayColor);
+                smearBrush.Color = Color.FromArgb(Math.Clamp(smearA, 0, 255), noteColor);
                 g.FillRectangle(smearBrush, SplitX, (float)Math.Min(y, yR) - 1, CanvasWidth - SplitX, (float)Math.Abs(y - yR) + 2);
 
                 // Pitch line
-                noteBrush.Color = Color.FromArgb((int)(o * 255), NoteDisplayColor);
+                noteBrush.Color = Color.FromArgb((int)(o * 255), noteColor);
                 g.FillRectangle(noteBrush, SplitX, (float)y - 1, CanvasWidth - SplitX, 2);
 
                 // Cents + Hz (below the line)
