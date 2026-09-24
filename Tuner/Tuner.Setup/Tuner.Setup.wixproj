@@ -5,15 +5,12 @@
   </PropertyGroup>
 
   <!-- Platform-specific settings -->
-  <PropertyGroup Condition="'$(Platform)' == 'x64'">
-    <InstallerPlatform>x64</InstallerPlatform>
-  </PropertyGroup>
-
+  <!-- Default to x64 for Any CPU, empty, or x64; use x86 only when explicitly set -->
   <PropertyGroup Condition="'$(Platform)' == 'x86'">
     <InstallerPlatform>x86</InstallerPlatform>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(Platform)' == ''">
+  <PropertyGroup Condition="'$(Platform)' != 'x86'">
     <InstallerPlatform>x64</InstallerPlatform>
   </PropertyGroup>
 
@@ -28,5 +25,15 @@
 
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tuner.csproj" />
+  </ItemGroup>
+
+  <!-- Print MSI output path after build -->
+  <Target Name="ShowMsiPath" AfterTargets="Build">
+    <Message Text="✅ Installer created: $(MSBuildProjectDirectory)\$(OutputPath)$(OutputName).msi" Importance="high" />
+  </Target>
 </Project>

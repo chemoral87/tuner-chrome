@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+﻿<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
@@ -17,6 +17,14 @@
     <!-- Application icon -->
     <Icon Id="TunerIcon" SourceFile="$(sys.CURRENTDIR)Tuner.ico" />
     <Property Id="ARPPRODUCTICON" Value="TunerIcon" />
+
+    <!-- Exit dialog: checkbox to launch app after install (checked by default).
+         NOTE: WiX's ExitDialog checkbox control is hardcoded to bind to the property
+         named exactly "WIXUI_EXITDIALOGOPTIONALCHECKBOX" with CheckBoxValue="1" - there
+         is no way to redirect it to a custom property name. Setting it here to "1"
+         makes the box checked by default. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Tuner" Secure="yes" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" Secure="yes" />
 
     <Feature Id="Main">
       <ComponentGroupRef Id="TunerFiles" />
@@ -44,7 +52,7 @@
 
     <!-- Application files -->
     <ComponentGroup Id="TunerFiles" Directory="INSTALLFOLDER">
-      <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.exe" />
+      <File Id="TunerExe" Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.exe" />
       <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.dll" />
       <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.deps.json" />
       <File Source="$(sys.CURRENTDIR)..\$(PublishFolder)\Tuner.runtimeconfig.json" />
@@ -78,8 +86,22 @@
       </Component>
     </DirectoryRef>
 
-    <!-- UI -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- UI: WixUI_Minimal includes Welcome -> License -> Progress -> Exit -->
+    <ui:WixUI Id="WixUI_Minimal" />
+
+    <!-- Custom Action: launch the installed app via WixShellExec -->
+    <Property Id="WixShellExecTarget" Value="[#TunerExe]" />
+    <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" Execute="immediate" />
+
+    <!-- Launch only when the user presses Finish AND the checkbox is still checked.
+         This must be a UI-level event on the ExitDialog's Finish button, NOT an
+         InstallExecuteSequence custom action - the execute sequence runs during
+         InstallFinalize, before the Exit dialog / checkbox are even shown, which
+         would launch the app unconditionally every time. -->
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = &quot;1&quot; AND NOT Installed" Order="999" />
+    </UI>
 
   </Package>
+
 </Wix>

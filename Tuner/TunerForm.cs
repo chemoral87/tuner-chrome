@@ -69,10 +69,6 @@ public sealed class TunerForm : Form
     private ToolStripMenuItem _startupMenuItem = null!;
     private ToolStripMenuItem _moveMenuItem = null!;
 
-    // --- Move mode (temporary drag via tray menu) ---
-    private bool _moveMode;
-    private Point _moveStart;
-
     // --- Win32 click-through ---
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TRANSPARENT = 0x00000020;
@@ -82,6 +78,10 @@ public sealed class TunerForm : Form
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    // --- Move mode (temporary drag via tray menu) ---
+    private bool _moveMode;
+    private Point _moveStart;
 
     // --- Settings persistence ---
     private static readonly string SettingsPath = Path.Combine(
@@ -99,8 +99,9 @@ public sealed class TunerForm : Form
         Opacity = 0.7;
 
         // Make window click-through by default (WS_EX_TRANSPARENT)
-        // WS_EX_LAYERED is auto-set by Opacity property, required for transparent input
         Load += (_, _) => SetClickThrough(true);
+
+
 
         // Canvas panel for custom rendering
         _canvas = new Panel
@@ -213,7 +214,7 @@ public sealed class TunerForm : Form
         _trayIcon = new NotifyIcon
         {
             Text = "Tuner",
-            Icon = SystemIcons.Application,
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
             Visible = true,
             ContextMenuStrip = _trayMenu,
         };
@@ -258,10 +259,8 @@ public sealed class TunerForm : Form
         };
     }
 
-    /// <summary>
-    /// Enables or disables click-through on the window.
-    /// When enabled, all mouse input passes to the window behind.
-    /// </summary>
+
+
     private void SetClickThrough(bool enable)
     {
         int exStyle = GetWindowLong(Handle, GWL_EXSTYLE);

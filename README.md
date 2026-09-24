@@ -17,3 +17,9 @@ A chromatic tuner for your browser. Powered by [pitchy](https://github.com/ianpr
 # Run it
 rm -rf tmp/chrome-profile && /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --no-first-run --no-default-browser-check --user-data-dir="$PWD/tmp/chrome-profile" --load-extension="$PWD/tmp/tuner"
 ```
+
+# One compiler
+
+cd Tuner
+dotnet publish Tuner.csproj -c Release -r win-x64 --self-contained false -o publish-x64
+dotnet build Tuner.Setup\Tuner.Setup.wixproj -c Release -p:Platform=x64
