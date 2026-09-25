@@ -62,7 +62,8 @@ public sealed class PitchDetector
 
     /// <summary>
     /// Detect pitch from time-domain input.
-    /// Returns (frequency_hz, clarity).
+    /// Returns (frequency_hz, clarity); frequency is NaN when no usable pitch was found
+    /// (callers must test the frequency rather than only IsFinite on a derived value).
     /// </summary>
     public (double pitch, double clarity) FindPitch(float[] input, double sampleRate)
     {
@@ -71,7 +72,7 @@ public sealed class PitchDetector
         // Find key maxima
         var keyMaxIndices = GetKeyMaximumIndices(_nsdf, _inputLength);
         if (keyMaxIndices.Count == 0)
-            return (0, 0);
+            return (double.NaN, 0);
 
         // Find the highest key maximum
         double nMax = double.MinValue;
@@ -93,10 +94,39 @@ public sealed class PitchDetector
         }
 
         if (resultIndex <= 0)
-            return (0, 0);
+            return (double.NaN, 0);
 
         double clarity = Math.Clamp(_nsdf[resultIndex], 0, 1);
-        return (sampleRate / resultIndex, clarity);
+        double lag = InterpolatePeak(resultIndex);
+        return (sampleRate / lag, clarity);
+    }
+
+    /// <summary>
+    /// Refines the NSDF peak to sub-sample precision from the three points around it.
+    /// Without this the pitch can only land on whole lags, which quantises it by about
+    /// 0.039 * frequency cents (≈17 cents at A4, ≈34 cents at A5). That staircase is what
+    /// made a sung glissando look like a series of steps; interpolating the vertex brings
+    /// the error below a cent across the whole range.
+    /// </summary>
+    private double InterpolatePeak(int index)
+    {
+        if (index <= 0 || index >= _inputLength - 1)
+            return index;
+
+        double left = _nsdf[index - 1];
+        double centre = _nsdf[index];
+        double right = _nsdf[index + 1];
+
+        double denom = left - 2.0 * centre + right;
+        if (denom == 0 || !double.IsFinite(denom))
+            return index;
+
+        double delta = 0.5 * (left - right) / denom;
+        // A sane vertex lies within half a sample; anything else is noise, so keep the raw peak.
+        if (!double.IsFinite(delta) || delta < -0.5 || delta > 0.5)
+            return index;
+
+        return index + delta;
     }
 
     /// <summary>

@@ -18,13 +18,25 @@ public sealed class TunerForm : Form
     private const int CanvasWidth = 480;
     private const int CanvasHeight = 320;
     private const int SplitX = 280;           // Left side = history, right side = note display
-    private const int MaxHistory = 560 / 3;   // ~186 samples (~3 seconds)
     private const int HistorySpacing = 3;      // Pixels per history sample
+    // The history pane is SplitX pixels wide, so this is exactly how many samples fit on
+    // screen. One sample is one analysis frame (BufferMilliseconds), i.e. the curve spans
+    // ~4.7 s of real time and nothing is drawn off-canvas.
+    private const int MaxHistory = SplitX / HistorySpacing;
     private const double PixelsPerSemitone = 45.0 / 2.0; // 22.5 px/semitone
     private const double YOffset = 300;        // Bottom of canvas in note coordinates
-    private const double ClarityThreshold = 0.9;
-    private const double SmoothingFactor = 1.0 / 5.0;
-    private const double SmoothingSnapThreshold = 1.0;
+    private const double ClarityThreshold = 0.9;         // gate for the note name / cents readout
+    private const double HistoryClarityThreshold = 0.75; // gate for the curve - looser, so breathier onsets and glides still draw
+    private const double HistoryHoldClarity = 0.45;      // below this the signal is really gone: break the curve
+    // NSDF clarity is amplitude-invariant, so a quiet room can still yield a confident-looking
+    // reading at a random pitch. A minimum signal level (-48 dBFS) keeps that out of both the
+    // readout and the curve. Raise it if room noise still shows up; lower it for a very quiet voice.
+    private const double MinRms = 0.004;
+    private const int HistoryHoldFrames = 2;             // ...but hold the last value through brief dips (~100 ms)
+    private const double LabelSmoothingFactor = 0.4;     // ~30 ms time constant for the readout only
+    // A voice cannot move 2 semitones inside one 50 ms frame, so a jump that large is a real
+    // leap (new note, octave correction) rather than a glide and may go straight to the label.
+    private const double LabelSnapThreshold = 2.0;
 
     // --- Color palette (matching tuner.js) ---
     private static readonly Color BgColor = Color.Black;
@@ -52,9 +64,15 @@ public sealed class TunerForm : Form
     private double _latestPitch;
     private readonly List<float> _sampleBuffer = new();
     private const int FftSize = 2048;
+    private long _samplesWritten;        // total samples handed over by the audio callback
+    private long _lastAnalyzedSamples;   // sample count at the last analysis frame
 
     // --- Pitch state ---
-    private double _note;
+    // _labelNote is the lightly smoothed value used for the note name and cents readout.
+    // The history deliberately stores the raw detection instead, so the curve is the voice.
+    private double _labelNote = double.NaN;
+    private double _lastRawNote = double.NaN;
+    private int _invalidFrames;
     private readonly List<double?> _historyData = new();
 
     // --- Notation ---
@@ -495,6 +513,8 @@ public sealed class TunerForm : Form
             _waveIn.DataAvailable += WaveIn_DataAvailable;
             _waveIn.StartRecording();
 
+            _samplesWritten = 0;
+            _lastAnalyzedSamples = 0;
             _renderTimer.Start();
 
             _statusLabel!.Text = "Listening...";
@@ -531,6 +551,7 @@ public sealed class TunerForm : Form
                 short s = BitConverter.ToInt16(e.Buffer, i * 2);
                 _sampleBuffer.Add(s / 32768f);
             }
+            _samplesWritten += sampleCount;
             // Keep buffer from growing unbounded
             if (_sampleBuffer.Count > FftSize * 4)
                 _sampleBuffer.RemoveRange(0, _sampleBuffer.Count - FftSize * 2);
@@ -546,39 +567,83 @@ public sealed class TunerForm : Form
         lock (_audioLock)
         {
             if (_sampleBuffer.Count < FftSize) return;
+
+            // Analyse once per audio buffer (~20 fps with 50 ms buffers) rather than once per
+            // repaint. The old 60 fps sampling re-read a window that only overlapped by 30 ms,
+            // so roughly two of every three history points were duplicates and the curve's
+            // horizontal scale was driven by timer jitter instead of real time.
+            if (_samplesWritten == _lastAnalyzedSamples) return;
+
             // Take the most recent FftSize samples
             input = _sampleBuffer.GetRange(_sampleBuffer.Count - FftSize, FftSize).ToArray();
             sampleRate = _latestSampleRate;
+            _lastAnalyzedSamples = _samplesWritten;
         }
 
         // Run pitch detection
         var (pitch, clarity) = _detector.FindPitch(input, sampleRate);
+
+        // Level gate - nothing is reported from a frame that holds no real sound.
+        double sumSquares = 0;
+        foreach (float sample in input) sumSquares += sample * (double)sample;
+        if (Math.Sqrt(sumSquares / input.Length) < MinRms)
+        {
+            pitch = double.NaN;
+            clarity = 0;
+        }
+
         _latestPitch = pitch;
         _latestClarity = clarity;
 
-        // Convert to MIDI note number
+        // Convert to MIDI note number (NaN when the frame produced no usable pitch)
         double fnote = FrequencyToMidi(pitch);
+        bool valid = double.IsFinite(fnote);
 
-        // Apply EMA smoothing
-        if (double.IsFinite(fnote) && !double.IsNaN(fnote))
+        // Only the readout is smoothed, and only lightly: a short time constant keeps the
+        // digits steady without letting the displayed note lag a moving voice.
+        if (valid)
         {
-            if (Math.Abs(fnote - _note) < SmoothingSnapThreshold)
-                _note += (fnote - _note) * SmoothingFactor;
+            if (double.IsNaN(_labelNote) || Math.Abs(fnote - _labelNote) > LabelSnapThreshold)
+                _labelNote = fnote;
             else
-                _note = fnote;
+                _labelNote += (fnote - _labelNote) * LabelSmoothingFactor;
         }
 
-        // Update history
-        if (clarity >= ClarityThreshold)
-            _historyData.Add(_note);
-        else
-            _historyData.Add(null);
-
-        if (_historyData.Count > MaxHistory)
-            _historyData.RemoveAt(0);
+        AppendHistory(valid ? fnote : null, clarity);
 
         // Trigger repaint
         _canvas.Invalidate();
+    }
+
+    /// <summary>
+    /// Adds one history entry for the current analysis frame.
+    /// The entry is the raw detection - no EMA, no snapping - so the drawn curve follows the
+    /// actual voice. A short hold bridges the brief clarity dips a glissando causes (a moving
+    /// pitch is not periodic across the 46 ms window, so its NSDF peak is lower than a held
+    /// note's); once the signal really disappears the entry is null and the stroke breaks.
+    /// </summary>
+    private void AppendHistory(double? rawNote, double clarity)
+    {
+        if (rawNote.HasValue && clarity >= HistoryClarityThreshold)
+        {
+            _lastRawNote = rawNote.Value;
+            _invalidFrames = 0;
+            _historyData.Add(rawNote.Value);
+        }
+        else if (!double.IsNaN(_lastRawNote) && clarity >= HistoryHoldClarity && _invalidFrames < HistoryHoldFrames)
+        {
+            _invalidFrames++;
+            _historyData.Add(_lastRawNote);
+        }
+        else
+        {
+            _invalidFrames = 0;
+            _lastRawNote = double.NaN;
+            _historyData.Add(null);
+        }
+
+        if (_historyData.Count > MaxHistory)
+            _historyData.RemoveAt(0);
     }
 
     private void Canvas_Paint(object? sender, PaintEventArgs e)
@@ -591,8 +656,8 @@ public sealed class TunerForm : Form
         // Clear canvas
         g.Clear(BgColor);
 
-        // Use cached pitch data from the last render tick
-        double note = _note;
+        // Use cached pitch data from the last analysis frame
+        double note = _labelNote;
         double pitch = _latestPitch;
         double clarity = _latestClarity;
 
@@ -682,8 +747,10 @@ public sealed class TunerForm : Form
         }
 
         // --- Draw pitch history line (left side) ---
+        // The curve plots the raw detection, one point per analysis frame, so it is the voice
+        // itself rather than a smoothed or snapped version of it.
         // Each continuous detection run produces one stroke per octave (-1, 0, +1).
-        // Null entries break the strokes, creating disconnected segments.
+        // Null entries end the open strokes, creating disconnected segments.
         // Uses anti-aliasing and a subtle glow effect for a polished look.
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.CompositingQuality = CompositingQuality.HighQuality;
@@ -694,9 +761,11 @@ public sealed class TunerForm : Form
         historyPen.StartCap = LineCap.Round;
         historyPen.LineJoin = LineJoin.Round;
 
-        // strokes[octaveNumber] = list of points for that continuous segment
-        var strokes = new Dictionary<int, List<PointF>>();
-        var activeOctaves = new HashSet<int>();
+        // open[octaveNumber] = the stroke currently being built for that octave;
+        // strokes = every completed stroke. A gap commits the open strokes and starts fresh,
+        // so silence is drawn as a break instead of a straight line across it.
+        var strokes = new List<List<PointF>>();
+        var open = new Dictionary<int, List<PointF>>();
 
         for (int i = 0; i < _historyData.Count; i++)
         {
@@ -710,35 +779,64 @@ public sealed class TunerForm : Form
                     int octaveNumber = (int)Math.Floor(entry.Value / 12) + octave;
                     double y = GetY(entry.Value - 12 * octaveNumber);
 
-                    if (!strokes.TryGetValue(octaveNumber, out var points))
+                    if (!open.TryGetValue(octaveNumber, out var points))
                     {
                         points = new List<PointF>();
-                        strokes[octaveNumber] = points;
+                        open[octaveNumber] = points;
                     }
                     points.Add(new PointF(x, (float)y));
-                    activeOctaves.Add(octaveNumber);
                 }
             }
             else
             {
-                activeOctaves.Clear();
+                strokes.AddRange(open.Values);
+                open.Clear();
             }
         }
+        strokes.AddRange(open.Values);
 
         // Draw glow layer (wider, semi-transparent) then crisp line on top
-        foreach (var stroke in strokes.Values)
+        foreach (var stroke in strokes)
         {
-            if (stroke.Count > 1)
-            {
-                g.DrawLines(glowPen, stroke.ToArray());
-                g.DrawLines(historyPen, stroke.ToArray());
-            }
+            if (stroke.Count <= 1) continue;
+            using var path = BuildSmoothPath(stroke);
+            g.DrawPath(glowPen, path);
+            g.DrawPath(historyPen, path);
         }
 
         // Reset smoothing for grid and note rendering
         g.SmoothingMode = SmoothingMode.None;
         g.CompositingQuality = CompositingQuality.Default;
     }
+
+    /// <summary>
+    /// Turns the sampled history into a curve. Each segment runs between the midpoints of two
+    /// neighbouring samples and uses the sample itself as its control point, which rounds off
+    /// the corners a 20 Hz polyline would show while still running along the measured values.
+    /// </summary>
+    private static GraphicsPath BuildSmoothPath(List<PointF> points)
+    {
+        var path = new GraphicsPath();
+        path.StartFigure();
+
+        if (points.Count == 2)
+        {
+            path.AddLine(points[0], points[1]);
+            return path;
+        }
+
+        path.AddLine(points[0], Midpoint(points[0], points[1]));
+        for (int i = 1; i < points.Count - 1; i++)
+        {
+            PointF start = Midpoint(points[i - 1], points[i]);
+            PointF end = Midpoint(points[i], points[i + 1]);
+            path.AddBezier(start, points[i], points[i], end);
+        }
+        path.AddLine(Midpoint(points[^2], points[^1]), points[^1]);
+        return path;
+    }
+
+    private static PointF Midpoint(PointF a, PointF b) => new((a.X + b.X) / 2f, (a.Y + b.Y) / 2f);
 
     /// <summary>
     /// Maps a MIDI note number to a Y coordinate on the canvas.
@@ -750,7 +848,10 @@ public sealed class TunerForm : Form
     /// </summary>
     private static double FrequencyToMidi(double f)
     {
-        if (f <= 0) return 0;
+        // An unusable reading must stay unusable. Returning a number here (this used to map
+        // 0 Hz to MIDI note 0) fed detection dropouts into the smoother, which dragged the
+        // displayed note down and then forced a snap on the next good frame.
+        if (!(f > 0) || !double.IsFinite(f)) return double.NaN;
         return 69.0 + 12.0 * Math.Log(f / 440.0) / Math.Log(2.0);
     }
 

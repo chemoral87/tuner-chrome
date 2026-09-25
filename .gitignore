@@ -55,3 +55,8 @@ obj/
 *.suo
 *.userosscache
 *.sln.docstates
+
+# Tuner publish output (binaries)
+Tuner/publish-*/*.exe
+Tuner/publish-*/*.dll
+Tuner/publish-*/*.pdb
